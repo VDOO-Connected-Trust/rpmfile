@@ -45,7 +45,10 @@ class RPMInfo(object):
     @property
     def file_start(self):
         if self.link_target is not None:
-            assert self.link_target != self
+            assert (
+                self.link_target != self,
+                "link to self found, circular dependency"
+            )
             return self.link_target.file_start
         return self._file_start
 
@@ -153,24 +156,34 @@ class RPMFile(object):
     _members = None
 
     @staticmethod
-    def _resolve_links(ino_map):
-        for _, _ino_members in ino_map.items():
-            _links_or_dirs = []
-            target_member = None
-            for member in _ino_members:
-                if member.size > 0 and not member.isdir:
-                    target_member = member
-                else:
-                    _links_or_dirs.append(member)
-            if target_member is None:
-                continue
-            for member in _links_or_dirs:
-                member.link_target = target_member
-                member.isdir = False
+    def _assign_link_to_members(links_or_dirs, link_target):
+        if link_target is None:
+            return
+        for member in links_or_dirs:
+            member.link_target = link_target
+            member.isdir = False
+
+    @classmethod
+    def _resolve_links_for_same_ino_members(cls, ino_members):
+        """All members in ino_members have the same inode, thus
+        referring to the same file"""
+        _links_or_dirs = []
+        target_member = None
+        for member in ino_members:
+            if member.size > 0 and not member.isdir:
+                assert target_member is None, "More than one target found"
+                target_member = member
+            else:
+                _links_or_dirs.append(member)
+        cls._assign_link_to_members(_links_or_dirs, target_member)
+
+    @classmethod
+    def _resolve_links(cls, ino_map):
+        for _, ino_members in ino_map.items():
+            cls._resolve_links_for_same_ino_members(ino_members)
 
     def getmembers(self):
-        """
-        Return the members of the archive as a list of RPMInfo objects. The
+        """Return the members of the archive as a list of RPMInfo objects. The
         list has the same order as the members in the archive.
         """
         if self._members is None:
@@ -191,12 +204,11 @@ class RPMFile(object):
 
                 magic = g.read(2)
             self._resolve_links(_ino_map)
-            self._members = list(filter(lambda x: not x.isdir, _members))
+            self._members = [member for member in _members if not member.isdir]
         return self._members
 
     def getmember(self, name):
-        """
-        Return an RPMInfo object for member `name'. If `name' can not be
+        """Return an RPMInfo object for member `name'. If `name' can not be
         found in the archive, KeyError is raised. If a member occurs more
         than once in the archive, its last occurrence is assumed to be the
         most up-to-date version.
@@ -209,8 +221,7 @@ class RPMFile(object):
         raise KeyError("member %s could not be found" % name)
 
     def extractfile(self, member):
-        """
-        Extract a member from the archive as a file object. `member' may be
+        """Extract a member from the archive as a file object. `member' may be
         a filename or an RPMInfo object.
         The file-like object is read-only and provides the following
         methods: read(), readline(), readlines(), seek() and tell()
@@ -222,8 +233,7 @@ class RPMFile(object):
     _data_file = None
 
     def get_binaries(self):
-        """
-        Get a list all members that were identified as ELF
+        """Get a list all members that were identified as ELF
         :return: List of RPMInfo, each represent a member identified as ELF
         """
 
