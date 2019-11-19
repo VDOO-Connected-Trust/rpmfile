@@ -1,5 +1,5 @@
 from __future__ import print_function, unicode_literals, absolute_import
-
+from collections import defaultdict
 import gzip
 import io
 import sys
@@ -42,29 +42,25 @@ class RPMInfo(object):
         self._is_elf = is_elf
         self.link_target = None
 
-    @property
-    def file_start(self):
+    def _get_target_attr(self, attr_name):
         if self.link_target is not None:
             assert (
                 self.link_target != self,
-                "link to self found, circular dependency"
+                "The target of the link is self, which should never happen"
             )
-            return self.link_target.file_start
-        return self._file_start
+            return getattr(self.link_target, attr_name)
+
+    @property
+    def file_start(self):
+        return self._get_target_attr('file_start') or self._file_start
 
     @property
     def size(self):
-        if self.link_target is not None:
-            assert self.link_target != self
-            return self.link_target.size
-        return self._size
+        return self._get_target_attr('size') or self._size
 
     @property
     def is_elf(self):
-        if self.link_target is not None:
-            assert self.link_target != self
-            return self.link_target.is_elf
-        return self._is_elf
+        return self._get_target_attr('is_elf') or self._is_elf
 
     @property
     def ino(self):
@@ -109,8 +105,15 @@ class RPMInfo(object):
         nlink = int(d[4], 16)
         ino = d[0] + d[1]
         isdir = nlink == 2 and file_size == 0
-        return cls(name, file_start, file_size, initial_offset, isdir, ino,
-                   is_elf)
+        return cls(
+                name,
+                file_start,
+                file_size,
+                initial_offset,
+                isdir,
+                ino,
+                is_elf,
+        )
 
 
 class RPMFile(object):
@@ -159,19 +162,28 @@ class RPMFile(object):
     def _assign_link_to_members(links_or_dirs, link_target):
         if link_target is None:
             return
+
         for member in links_or_dirs:
             member.link_target = link_target
             member.isdir = False
 
     @classmethod
     def _resolve_links_for_same_ino_members(cls, ino_members):
-        """All members in ino_members have the same inode, thus
-        referring to the same file"""
+        """For a list of members sharing the same inode, find the target
+        member (the one with size > 0) and assign all other members to point
+        to it.
+        All members in ino_members have the same inode, thus
+        referring to the same file
+
+        ino_members: members sharing the same inode
+        """
         _links_or_dirs = []
         target_member = None
         for member in ino_members:
             if member.size > 0 and not member.isdir:
-                assert target_member is None, "More than one target found"
+
+                assert target_member is None, ("More than one target found,"
+                                               " this should never happen")
                 target_member = member
             else:
                 _links_or_dirs.append(member)
@@ -188,7 +200,6 @@ class RPMFile(object):
         """
         if self._members is None:
             _members = []
-            from collections import defaultdict
             _ino_map = defaultdict(list)
             g = self.data_file
             magic = g.read(2)
@@ -234,10 +245,10 @@ class RPMFile(object):
 
     def get_binaries(self):
         """Get a list all members that were identified as ELF
+
         :return: List of RPMInfo, each represent a member identified as ELF
         """
-
-        return list(filter(lambda m: m.is_elf, self.getmembers()))
+        return [member for member in self.getmembers() if member.is_elf]
 
     @property
     def data_file(self):
